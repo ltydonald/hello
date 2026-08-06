@@ -34,9 +34,11 @@ import data_download_common as common
 # CONFIG - edit these
 # =============================================================================
 INTERVAL_DEFAULT = "1d"  # daily bars by default (unlike download_hk_data.py's hourly default) - override with --interval
-YEARS_DEFAULT = 20         # yfinance only serves ~2 years of "1h" bars; switch to --interval 1d for a multi-year pull
+YEARS_DEFAULT = 10         # yfinance only serves ~2 years of "1h" bars; switch to --interval 1d for a multi-year pull
 OUT_DEFAULT = "us_universe_data.csv"
 CACHE_DIR = Path(__file__).parent / "us_alpha101_cache"
+MIN_ADV_DEFAULT = 1_000_000  # USD average daily dollar volume floor - screens out illiquid microcap names;
+                              # see the GEM-microcap liquidity exploitation finding from ML backtesting
 
 # Russell 3000 constituents (~2,580 tickers, via iShares' IWV ETF holdings) -
 # see load_us_universe() in data_download_common.py for the exact filter and
@@ -59,6 +61,7 @@ def main():
         default_out=OUT_DEFAULT,
         default_years=YEARS_DEFAULT,
         default_days=None,
+        default_min_adv=MIN_ADV_DEFAULT,
     )
     args = p.parse_args()
     if args.start is None and args.days is None and args.years is None:

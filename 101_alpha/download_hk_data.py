@@ -9,8 +9,8 @@ Output schema (one row per date x ticker):
 
 Usage
 -----
-python download_hk_data.py                                # 1y (see YEARS_DEFAULT below), ~2,790-ticker default universe -> hk_universe_data.csv
-python download_hk_data.py --years 10 --out data10y.csv
+python download_hk_data.py                                # 1d bars, 10y (see YEARS_DEFAULT below), ~2,790-ticker default universe -> hk_universe_data.csv
+python download_hk_data.py --years 20 --out data20y.csv
 python download_hk_data.py --tickers 0700.HK 9988.HK --years 3
 python download_hk_data.py --no-cap --no-industry          # OHLCV only, much faster (skips per-ticker .info calls)
 
@@ -32,10 +32,14 @@ import data_download_common as common
 # CONFIG - edit these
 # =============================================================================
 INTERVAL_DEFAULT = "1d"
-YEARS_DEFAULT = 20        # NOTE: earlier versions of this docstring said "10y" - the actual default has always been 1;
-                          # bump this to 10 (matching alpha_ML.py's YEARS_HISTORY) if you want a longer default pull.
+YEARS_DEFAULT = 10       # matches alpha_ML.py's YEARS_HISTORY
 OUT_DEFAULT = "hk_universe_data.csv"
 CACHE_DIR = Path(__file__).parent / "hk_alpha101_cache"
+MIN_ADV_DEFAULT = 5_000_000  # HKD average daily dollar volume floor - screens out illiquid GEM/penny names;
+                              # see the GEM-microcap liquidity exploitation finding from ML backtesting
+BENCHMARK_TICKER = "^HSI"    # saved into the same CSV (exempt from the ADV screen) so backtest scripts
+                              # (e.g. hk_alpha_stock_backtest.py) can read its price series straight out of
+                              # the CSV instead of making their own live yfinance call every run
 
 # All currently-listed HKD-denominated ordinary equities + REITs on HKEX Main
 # Board/GEM (~2,790 tickers) - see load_hk_universe() in data_download_common.py
@@ -58,13 +62,14 @@ def main():
         default_out=OUT_DEFAULT,
         default_years=YEARS_DEFAULT,
         default_days=None,
+        default_min_adv=MIN_ADV_DEFAULT,
     )
     args = p.parse_args()
     if args.start is None and args.days is None and args.years is None:
         args.years = YEARS_DEFAULT
     ticker_list = args.tickers or tickers
     common.run(tickers=ticker_list, args=args, interval_default=INTERVAL_DEFAULT,
-               cache_dir=CACHE_DIR, market_name="HK")
+               cache_dir=CACHE_DIR, market_name="HK", benchmark_ticker=BENCHMARK_TICKER)
 
 
 if __name__ == "__main__":

@@ -263,7 +263,7 @@ def fetch_ohlcv_incremental(tickers, existing_csv, start, end=None, min_obs=1, *
             close_df[keep_cols], volume_df[keep_cols])
 
 
-def _fetch_one(t, call, max_retries=4, retry_backoff=15.0):
+def _fetch_one(t, call, max_retries=1, retry_backoff=15.0):
     """Run `call()` for a single ticker, retrying only on YFRateLimitError
     (with growing backoff) - any other exception means the ticker itself is
     the problem (delisted, bad symbol, etc.), not the rate limit, so retrying
@@ -280,7 +280,7 @@ def _fetch_one(t, call, max_retries=4, retry_backoff=15.0):
     return None
 
 
-def fetch_cap(tickers, close_df, cache_file, pause=0.1, max_retries=4, retry_backoff=15.0):
+def fetch_cap(tickers, close_df, cache_file, pause=0.1, max_retries=1, retry_backoff=15.0):
     """Approximate market cap = latest shares outstanding x historical close.
 
     One yfinance call per ticker (fast_info has no bulk/multi-ticker form
@@ -308,7 +308,7 @@ def fetch_cap(tickers, close_df, cache_file, pause=0.1, max_retries=4, retry_bac
     return close_df.mul(shares_s, axis=1)
 
 
-def fetch_industry(tickers, cache_file, pause=0.1, max_retries=4, retry_backoff=15.0):
+def fetch_industry(tickers, cache_file, pause=0.1, max_retries=1, retry_backoff=15.0):
     """Best-effort sector/industry classification for indneutralize()."""
     data = json.loads(cache_file.read_text()) if cache_file.exists() else {}
 
@@ -356,7 +356,7 @@ def to_long_format(open_df, high_df, low_df, close_df, volume_df, cap_df=None, s
     return long_df.sort_values(["date", "ticker"]).reset_index(drop=True)
 
 
-def build_arg_parser(*, market_label, default_tickers_help, default_out, default_years, default_days):
+def build_arg_parser(*, market_label, default_tickers_help, default_out, default_years, default_days, default_min_adv=0):
     p = argparse.ArgumentParser(description=f"Download {market_label} stock data into a long-format CSV database (schema-compatible with hk_alpha101_single.py)")
     p.add_argument("--tickers", nargs="*", default=None, help=default_tickers_help)
     p.add_argument("--years", type=float, default=None, help=f"years of history to download (default: {default_years})")
@@ -365,6 +365,11 @@ def build_arg_parser(*, market_label, default_tickers_help, default_out, default
     p.add_argument("--end", default=None)
     p.add_argument("--interval", default=None, help="yfinance bar interval, e.g. '1d', '1h' (default: market-specific)")
     p.add_argument("--min-obs-frac", type=float, default=0.5, help="drop a ticker with fewer than this fraction x expected bars of history")
+    p.add_argument("--min-adv", type=float, default=default_min_adv,
+                    help="drop a ticker whose average daily dollar volume (close * volume, meaned over the "
+                         "downloaded date range) is below this, in the market's local currency - screens out "
+                         "illiquid penny/microcap names before they're ever saved to the CSV (default: "
+                         f"{default_min_adv:,.0f}, use 0 to disable)")
     p.add_argument("--info-pause", type=float, default=0.1, help="seconds to sleep between yfinance per-ticker .info/fast_info calls (cap + sector/industry fetch) - the most rate-limit-exposed step, since those have no bulk/multi-ticker form")
     p.add_argument("--no-adjust", dest="adjust", action="store_false",
                     help="fetch raw (ex-dividend) close instead of the default dividend/split-adjusted total-return price. "
@@ -383,9 +388,20 @@ def build_arg_parser(*, market_label, default_tickers_help, default_out, default
     return p
 
 
-def run(*, tickers, args, interval_default, cache_dir, market_name):
+def run(*, tickers, args, interval_default, cache_dir, market_name, benchmark_ticker=None):
+    """`benchmark_ticker`: an index ticker (e.g. "^HSI") to fetch and save into
+    the same CSV alongside `tickers`, so a backtest script can read the
+    benchmark's price series straight out of the CSV instead of making its own
+    live yfinance call every run. Exempted from the --min-adv liquidity screen
+    below (an index reports 0 volume in yfinance, so it would otherwise always
+    fail any positive dollar-volume floor) and from the ticker-count logging,
+    since it isn't part of the tradeable universe.
+    """
     cache_dir.mkdir(exist_ok=True)
     interval = args.interval or interval_default
+    fetch_tickers = list(tickers)
+    if benchmark_ticker and benchmark_ticker not in fetch_tickers:
+        fetch_tickers.append(benchmark_ticker)
 
     if args.start:
         start = args.start
@@ -401,21 +417,36 @@ def run(*, tickers, args, interval_default, cache_dir, market_name):
     min_obs = max(1, int(period_years * bars_per_year * args.min_obs_frac))
 
     fetch_settings = dict(interval=interval, auto_adjust=args.adjust)
+    bench_note = f" + benchmark ({benchmark_ticker})" if benchmark_ticker else ""
     if args.full_refresh:
-        print(f"Downloading {interval} OHLCV for {len(tickers)} {market_name} tickers, {start} to {args.end or 'today'} (--full-refresh) ...")
+        print(f"Downloading {interval} OHLCV for {len(tickers)} {market_name} tickers{bench_note}, {start} to {args.end or 'today'} (--full-refresh) ...")
         open_df, high_df, low_df, close_df, volume_df = fetch_ohlcv(
-            tickers, start, args.end, min_obs=min_obs, **fetch_settings,
+            fetch_tickers, start, args.end, min_obs=min_obs, **fetch_settings,
         )
     else:
-        print(f"Updating {interval} OHLCV for {len(tickers)} {market_name} tickers, "
+        print(f"Updating {interval} OHLCV for {len(tickers)} {market_name} tickers{bench_note}, "
               f"final window {start} to {args.end or 'today'} (incremental - reusing {args.out} where possible) ...")
         open_df, high_df, low_df, close_df, volume_df = fetch_ohlcv_incremental(
-            tickers, args.out, start, args.end, min_obs=min_obs, **fetch_settings,
+            fetch_tickers, args.out, start, args.end, min_obs=min_obs, **fetch_settings,
         )
-    print(f"Got {close_df.shape[1]}/{len(tickers)} tickers, {close_df.shape[0]} bars.")
+    print(f"Got {close_df.shape[1]}/{len(fetch_tickers)} ticker(s), {close_df.shape[0]} bars.")
     if close_df.shape[1] == 0:
         print("No data retrieved - check tickers/date range/network access.")
         return
+
+    if args.min_adv:
+        avg_dv = (close_df * volume_df).mean(axis=0, skipna=True)
+        keep = avg_dv[avg_dv >= args.min_adv].index
+        if benchmark_ticker and benchmark_ticker in avg_dv.index and benchmark_ticker not in keep:
+            keep = keep.union([benchmark_ticker])  # never screen out the benchmark on liquidity
+        dropped = len(avg_dv) - len(keep)
+        if dropped:
+            print(f"ADV screen: dropping {dropped}/{len(avg_dv)} tickers below "
+                  f"{args.min_adv:,.0f} average daily dollar volume (before the cap/sector .info fetch, "
+                  f"so screened-out tickers never cost a per-ticker API call) ...")
+            open_df, high_df, low_df, close_df, volume_df = (
+                open_df[keep], high_df[keep], low_df[keep], close_df[keep], volume_df[keep]
+            )
 
     cap_df = None
     if not args.no_cap:
